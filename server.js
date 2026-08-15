@@ -3,7 +3,8 @@
 // One file, zero runtime dependencies (Node >= 18). Implements RFC 4226/6238
 // with the built-in crypto module, stores entries encrypted at rest
 // (AES-256-GCM), and serves them over a bearer-token-authenticated REST API
-// plus a built-in web UI. API keys are stored as sha256 hashes only.
+// plus a built-in web UI. API keys are stored as sha256 hashes only, support
+// admin/readonly scopes, and are rate-limited to resist brute force.
 //
 //   node server.js                    # run (reads config from env)
 //   import * as s from './server.js'  # use as a library in tests
@@ -14,9 +15,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import net from 'node:net';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 // ---------------------------------------------------------------------------
 // Config / storage paths
@@ -33,6 +35,11 @@ export const keyFile = () => path.join(dataDir(), 'master.key');
 export const tokenFile = () => path.join(dataDir(), 'api.token');
 
 export const STORE_HEADER = 'cliotp-server-encrypted-v1';
+
+function envInt(name, dflt) {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : dflt;
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -399,7 +406,7 @@ export function withLock(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Auth (multiple API keys, stored as sha256 hashes)
+// Auth (multiple API keys, stored as sha256 hashes, with admin/readonly scope)
 // ---------------------------------------------------------------------------
 
 export function sha256hex(s) {
@@ -408,17 +415,22 @@ export function sha256hex(s) {
 
 export const keysFile = () => path.join(dataDir(), 'api-keys.json');
 
+let _keysCache = null;
+
 export function loadKeys() {
+  if (_keysCache) return _keysCache;
   const p = keysFile();
   if (!fs.existsSync(p)) return [];
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf8')).keys || [];
+    _keysCache = JSON.parse(fs.readFileSync(p, 'utf8')).keys || [];
   } catch {
-    return [];
+    _keysCache = [];
   }
+  return _keysCache;
 }
 
 export function saveKeys(keys) {
+  _keysCache = keys;
   const p = keysFile();
   fs.mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
   const tmp = `${p}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
@@ -433,22 +445,93 @@ export function bootstrapKeys(envToken) {
   if (fs.existsSync(keysFile())) return null;
   const legacy = tokenFile();
   const root = envToken || (fs.existsSync(legacy) ? fs.readFileSync(legacy, 'utf8').trim() : crypto.randomBytes(32).toString('hex'));
-  saveKeys([{ id: 'k_' + crypto.randomBytes(6).toString('hex'), name: 'default', keyHash: sha256hex(root), createdAt: Math.floor(Date.now() / 1000) }]);
+  saveKeys([{ id: 'k_' + crypto.randomBytes(6).toString('hex'), name: 'default', scope: 'admin', keyHash: sha256hex(root), createdAt: Math.floor(Date.now() / 1000) }]);
   if (!envToken) fs.writeFileSync(legacy, root + '\n', { mode: 0o600 });
   return root;
 }
 
-export function isValidKey(provided, envToken) {
-  if (!provided) return false;
-  if (envToken && safeEqual(provided, envToken)) return true;
+// Authenticate a provided key. Returns the matched key entry (or null when it
+// matched the env rescue token), so callers can apply scope + lastUsedAt.
+export function authenticate(provided, envToken) {
+  if (!provided) return { ok: false, key: null };
+  if (envToken && safeEqual(provided, envToken)) return { ok: true, key: null };
   const h = sha256hex(provided);
-  return loadKeys().some((k) => safeEqual(k.keyHash, h));
+  const key = loadKeys().find((k) => safeEqual(k.keyHash, h));
+  return { ok: Boolean(key), key: key || null };
+}
+
+export function isValidKey(provided, envToken) {
+  return authenticate(provided, envToken).ok;
 }
 
 function safeEqual(a, b) {
   const ha = crypto.createHash('sha256').update(String(a)).digest();
   const hb = crypto.createHash('sha256').update(String(b)).digest();
   return crypto.timingSafeEqual(ha, hb);
+}
+
+// Record key use in memory (always) and persist at most once a minute.
+const lastUsedThrottle = new Map();
+function touchLastUsed(key) {
+  if (!key || !key.id) return;
+  key.lastUsedAt = Math.floor(Date.now() / 1000);
+  const last = lastUsedThrottle.get(key.id) || 0;
+  if (Date.now() - last < 60_000) return;
+  lastUsedThrottle.set(key.id, Date.now());
+  withLock(() => saveKeys(loadKeys())).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting + IP allowlist
+// ---------------------------------------------------------------------------
+
+export function makeLimiter(windowMs, max) {
+  const hits = new Map();
+  return {
+    allow(key) {
+      const now = Date.now();
+      const rec = hits.get(key);
+      if (!rec || now - rec.start >= windowMs) { hits.set(key, { start: now, count: 1 }); return true; }
+      if (rec.count >= max) return false;
+      rec.count++;
+      return true;
+    },
+    reset(key) { hits.delete(key); },
+  };
+}
+
+export function makeAllowlist(spec) {
+  const list = new net.BlockList();
+  const entries = String(spec || '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const entry of entries) {
+    if (entry.includes('/')) {
+      const [ip, pfx] = entry.split('/');
+      const t = net.isIP(ip) === 6 ? 'ipv6' : 'ipv4';
+      list.addSubnet(ip, Number(pfx), t);
+    } else {
+      const t = net.isIP(entry);
+      if (t === 4) list.addAddress(entry, 'ipv4');
+      else if (t === 6) list.addAddress(entry, 'ipv6');
+    }
+  }
+  return {
+    enabled: entries.length > 0,
+    check(ip) {
+      if (!this.enabled) return true;
+      const addr = String(ip || '').replace(/^::ffff:/, '');
+      const t = net.isIP(addr);
+      if (!t) return false;
+      return list.check(addr, t === 6 ? 'ipv6' : 'ipv4');
+    },
+  };
+}
+
+function clientIp(req) {
+  if (process.env.CLIOTP_TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    if (xff) return String(xff).split(',')[0].trim();
+  }
+  return req.socket.remoteAddress || '';
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +601,11 @@ function applyEdit(entry, patch) {
   return fresh;
 }
 
+function hasDuplicate(entries, entry) {
+  const lbl = label(entry).toLowerCase();
+  return entries.some((e) => label(e).toLowerCase() === lbl);
+}
+
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
@@ -582,9 +670,19 @@ function publicEntry(e) {
   return { id: e.id, name: e.name, issuer: e.issuer, digits: e.digits, period: e.period, algorithm: e.algorithm, kind: e.kind, counter: e.kind === 'hotp' ? e.counter : undefined };
 }
 
+function publicKey(k) {
+  return { id: k.id, name: k.name, scope: k.scope || 'admin', createdAt: k.createdAt, lastUsedAt: k.lastUsedAt || null };
+}
+
+const metrics = { requests: 0, startedAt: Date.now() };
+
 export function createServer(options = {}) {
   const envToken = options.token || process.env.CLIOTP_TOKEN || null;
   bootstrapKeys(envToken);
+
+  const allowlist = makeAllowlist(options.allowIp || process.env.CLIOTP_ALLOW_IP || '');
+  const apiLimiter = makeLimiter(60_000, envInt('CLIOTP_RATE_LIMIT', 300));
+  const authLimiter = makeLimiter(envInt('CLIOTP_AUTH_WINDOW_MS', 900_000), envInt('CLIOTP_AUTH_MAX_FAILS', 10));
 
   function resolveEntry(entries, ref) {
     if (/^\d+$/.test(ref)) {
@@ -604,6 +702,17 @@ export function createServer(options = {}) {
   const handler = async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname.replace(/\/+$/, '') || '/';
+    const ip = clientIp(req);
+    const start = process.hrtime.bigint();
+
+    res.on('finish', () => {
+      metrics.requests++;
+      if (process.env.CLIOTP_LOG !== '0' && p.startsWith('/api/')) {
+        const ms = (Number(process.hrtime.bigint() - start) / 1e6).toFixed(1);
+        // eslint-disable-next-line no-console
+        console.log(`${new Date().toISOString()} ${req.method} ${p} ${res.statusCode} ${ip} ${ms}ms`);
+      }
+    });
 
     try {
       // Static web UI (public, no auth)
@@ -615,24 +724,52 @@ export function createServer(options = {}) {
         return json(res, 200, { ok: true, version: VERSION });
       }
 
-      // Everything under /api requires auth.
+      if (req.method === 'GET' && p === '/metrics') {
+        let entries = 0;
+        try { entries = loadStore().length; } catch { /* report 0 on store error */ }
+        const body = [
+          '# HELP cliotp_uptime_seconds Server uptime in seconds',
+          '# TYPE cliotp_uptime_seconds gauge',
+          `cliotp_uptime_seconds ${((Date.now() - metrics.startedAt) / 1000).toFixed(0)}`,
+          '# HELP cliotp_entries Number of stored entries',
+          '# TYPE cliotp_entries gauge',
+          `cliotp_entries ${entries}`,
+          '# HELP cliotp_requests_total Total HTTP requests served',
+          '# TYPE cliotp_requests_total counter',
+          `cliotp_requests_total ${metrics.requests}`,
+          '',
+        ].join('\n');
+        res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Content-Length': Buffer.byteLength(body) });
+        return res.end(body);
+      }
+
+      // Everything under /api requires auth + allowlist + rate limit.
+      if (!allowlist.check(ip)) return json(res, 403, { error: 'forbidden by IP allowlist' });
+      if (!apiLimiter.allow(ip)) return json(res, 429, { error: 'too many requests, slow down' });
+
       const auth = req.headers.authorization || '';
       const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const provided = bearer || req.headers['x-api-token'] || '';
-      if (!provided || !isValidKey(provided, envToken)) {
+      const cred = authenticate(provided, envToken);
+      if (!cred.ok) {
         res.setHeader('WWW-Authenticate', 'Bearer');
+        if (!authLimiter.allow(ip)) return json(res, 429, { error: 'too many failed attempts, slow down' });
         return json(res, 401, { error: 'unauthorized' });
       }
+      authLimiter.reset(ip);
+      if (cred.key) touchLastUsed(cred.key);
+      const isAdmin = !cred.key || cred.key.scope !== 'readonly';
 
-      // GET /api/entries
+      // GET /api/entries (any key)
       if (req.method === 'GET' && p === '/api/entries') {
         return json(res, 200, loadStore().map(publicEntry));
       }
 
-      // POST /api/entries  { ...fields } | { uri }
+      // POST /api/entries  { ...fields } | { uri }  (admin)
       if (req.method === 'POST' && p === '/api/entries') {
+        if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
         const body = await readJsonBody(req);
-        return withLock(() => {
+        return await withLock(() => {
           const entries = loadStore();
           let added;
           if (body.uri) {
@@ -643,12 +780,14 @@ export function createServer(options = {}) {
               added = parsed;
             } else {
               const e = parseOtpauth(u);
+              if (hasDuplicate(entries, e)) throw new HttpError(409, `"${label(e)}" already exists`);
               e.id = nextId(entries);
               entries.push(e);
               added = [e];
             }
           } else {
             const e = buildEntry(body);
+            if (hasDuplicate(entries, e)) throw new HttpError(409, `"${label(e)}" already exists`);
             e.id = nextId(entries);
             entries.push(e);
             added = [e];
@@ -658,12 +797,13 @@ export function createServer(options = {}) {
         });
       }
 
-      // GET /api/export  (all otpauth URIs — sensitive)
+      // GET /api/export  (admin — reveals secrets)
       if (req.method === 'GET' && p === '/api/export') {
+        if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
         return json(res, 200, { entries: loadStore().map(encodeOtpauth) });
       }
 
-      // GET /api/codes — peek at every code (does not advance HOTP counters)
+      // GET /api/codes — peek at every code (any key; does not advance HOTP)
       if (req.method === 'GET' && p === '/api/codes') {
         const now = Math.floor(Date.now() / 1000);
         const codes = loadStore().map((e) => ({
@@ -673,33 +813,37 @@ export function createServer(options = {}) {
         return json(res, 200, codes);
       }
 
-      // GET /api/keys — list API keys (metadata only; secrets are never returned again)
+      // GET /api/keys (admin)
       if (req.method === 'GET' && p === '/api/keys') {
-        return json(res, 200, loadKeys().map(({ id, name, createdAt }) => ({ id, name, createdAt })));
+        if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
+        return json(res, 200, loadKeys().map(publicKey));
       }
 
-      // POST /api/keys — create a key; its secret is returned exactly once
+      // POST /api/keys — create a key; its secret is returned exactly once (admin)
       if (req.method === 'POST' && p === '/api/keys') {
+        if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
         const body = await readJsonBody(req);
-        return withLock(() => {
+        return await withLock(() => {
           const keys = loadKeys();
           const secret = crypto.randomBytes(32).toString('hex');
           const key = {
             id: 'k_' + crypto.randomBytes(6).toString('hex'),
             name: String(body.name || '').trim() || 'key-' + (keys.length + 1),
+            scope: body.scope === 'readonly' ? 'readonly' : 'admin',
             keyHash: sha256hex(secret),
             createdAt: Math.floor(Date.now() / 1000),
           };
           keys.push(key);
           saveKeys(keys);
-          return json(res, 201, { id: key.id, name: key.name, createdAt: key.createdAt, key: secret });
+          return json(res, 201, { id: key.id, name: key.name, scope: key.scope, createdAt: key.createdAt, key: secret });
         });
       }
 
-      // DELETE /api/keys/:id — revoke a key (never the last one)
+      // DELETE /api/keys/:id — revoke a key (never the last one) (admin)
       const keyMatch = p.match(/^\/api\/keys\/([^/]+)$/);
       if (keyMatch && req.method === 'DELETE') {
-        return withLock(() => {
+        if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
+        return await withLock(() => {
           const keys = loadKeys();
           if (keys.length <= 1) return json(res, 400, { error: 'cannot revoke the last API key' });
           const id = decodeURIComponent(keyMatch[1]);
@@ -719,7 +863,7 @@ export function createServer(options = {}) {
 
         if (sub === 'code') {
           if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
-          return withLock(() => {
+          return await withLock(() => {
             const entries = loadStore();
             const entry = resolveEntry(entries, ref);
             const gen = generateCode(entry);
@@ -733,6 +877,7 @@ export function createServer(options = {}) {
 
         if (sub === 'uri') {
           if (req.method !== 'GET') throw new HttpError(405, 'method not allowed');
+          if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
           const entry = resolveEntry(loadStore(), ref);
           return json(res, 200, { uri: encodeOtpauth(entry) });
         }
@@ -743,7 +888,8 @@ export function createServer(options = {}) {
         }
 
         if (req.method === 'DELETE') {
-          return withLock(() => {
+          if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
+          return await withLock(() => {
             const entries = loadStore();
             const entry = resolveEntry(entries, ref);
             const remaining = entries.filter((e) => e.id !== entry.id);
@@ -753,8 +899,9 @@ export function createServer(options = {}) {
         }
 
         if (req.method === 'PATCH') {
+          if (!isAdmin) return json(res, 403, { error: 'forbidden: admin scope required' });
           const body = await readJsonBody(req);
-          return withLock(() => {
+          return await withLock(() => {
             const entries = loadStore();
             const entry = resolveEntry(entries, ref);
             const updated = applyEdit(entry, body);
@@ -814,6 +961,15 @@ function main() {
       console.log(`generated API token (save it!): ${rootKey}`);
     }
   });
+
+  const shutdown = (signal) => {
+    // eslint-disable-next-line no-console
+    console.log(`received ${signal}, shutting down`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

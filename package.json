@@ -1,6 +1,6 @@
 {
   "name": "cliotp-server",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Self-hosted TOTP/HOTP/Steam server with a REST API and a terminal client. Zero runtime dependencies.",
   "type": "module",
   "bin": {

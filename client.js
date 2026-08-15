@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const VERSION = '0.1.0';
+const VERSION = '0.3.0';
 
 // ---------------------------------------------------------------------------
 // Config

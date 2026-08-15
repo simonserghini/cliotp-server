@@ -60,6 +60,16 @@ directly.
 - starts with **pm2 if installed**, otherwise a background `nohup` process
 - prints the API token — **save it**, it is not recoverable from the server
 
+### systemd (recommended on a VPS)
+
+```sh
+sudo ./install.sh --systemd
+```
+
+Installs to `/opt/cliotp-server`, creates a `cliotp` system user, writes the
+token to `/etc/cliotp-server.env` (`0600`), and enables a hardened
+`cliotp-server.service` (`Restart=always`, `NoNewPrivileges`, `ProtectSystem`).
+
 ### Bare Node
 
 ```sh
@@ -129,7 +139,8 @@ token, exactly like the CLI.
 
 ## API reference
 
-Every route except `/healthz` requires:
+Every `/api/*` route requires a valid key (`/healthz`, `/metrics`, and the web
+UI are public):
 
 ```
 Authorization: Bearer <token>      # or X-API-Token: <token>
@@ -138,6 +149,7 @@ Authorization: Bearer <token>      # or X-API-Token: <token>
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/healthz` | Liveness probe (no auth) |
+| GET | `/metrics` | Prometheus metrics (no auth) |
 | GET | `/api/entries` | List entries (no secrets) |
 | POST | `/api/entries` | Add from fields or `{ "uri": "otpauth://…" }` |
 | GET | `/api/entries/:id` | Entry details (no secret) |
@@ -168,7 +180,19 @@ curl -H "Authorization: Bearer $TOKEN" https://vps/api/entries/github/code
 
 `name` (required), `secret` (required, unless `uri` is given), `issuer`,
 `digits` (6|8), `period` (default 30), `algorithm` (SHA1|SHA256|SHA512),
-`kind` (totp|hotp|steam), `counter` (HOTP only).
+`kind` (totp|hotp|steam), `counter` (HOTP only). Duplicate labels are
+rejected with `409`.
+
+### Key scopes
+
+Each key has a `scope`:
+
+- **`admin`** (default) — full access: CRUD entries, export/uri, key management.
+- **`readonly`** — fetch codes only (`GET /api/entries`, `/api/codes`,
+  `:id/code`). Mutations, `export`, `uri`, and `/api/keys` return `403`.
+
+Create a readonly key with `POST /api/keys { "name": "…", "scope": "readonly" }`.
+`GET /api/keys` also reports each key's `lastUsedAt`.
 
 ---
 
@@ -183,6 +207,12 @@ Server reads from environment variables:
 | `PORT` | `8080` | Listen port |
 | `HOST` | `0.0.0.0` | Listen address |
 | `CLIOTP_TLS_CERT` / `CLIOTP_TLS_KEY` | — | Optional; serve HTTPS directly |
+| `CLIOTP_ALLOW_IP` | — | Comma-separated IPs/CIDRs allowed to reach `/api` |
+| `CLIOTP_RATE_LIMIT` | `300` | Max requests/min per IP on `/api` |
+| `CLIOTP_AUTH_MAX_FAILS` | `10` | Failed auths before a `429` lockout |
+| `CLIOTP_AUTH_WINDOW_MS` | `900000` | Failed-auth window (15 min) |
+| `CLIOTP_TRUST_PROXY` | — | Set to honor `X-Forwarded-For` (behind a proxy) |
+| `CLIOTP_LOG` | on | Set `0` to disable the `/api` access log |
 
 Client reads `CLIOTP_SERVER`, `CLIOTP_TOKEN`, `CLIOTP_CONFIG`, or
 `--server` / `--token` / `--insecure` flags.
@@ -212,6 +242,9 @@ secrets. Or run `cliotpc export` and stash the plaintext URIs somewhere safe.
   from someone who can read the process memory of the running server.
 - Run a **single server instance** against one data dir; HOTP counters
   advance on read and concurrent multi-process writes are not coordinated.
+- Auth is **rate-limited** per IP (10 failures → `429` for 15 min) and can be
+  restricted to an **IP allowlist** (`CLIOTP_ALLOW_IP`). Behind a reverse
+  proxy, set `CLIOTP_TRUST_PROXY=1` so these key off the real client IP.
 
 ---
 

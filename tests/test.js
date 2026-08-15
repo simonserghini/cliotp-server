@@ -351,3 +351,85 @@ test('API key management lifecycle', async () => {
   const lastRevoke = await req('DELETE', `/api/keys/${remaining[0].id}`);
   assert.equal(lastRevoke.status, 400);
 });
+
+// --- hardening features ---
+
+test('IP allowlist matcher', () => {
+  const allow = s.makeAllowlist('10.0.0.0/8, 192.168.1.5');
+  assert.equal(allow.check('10.1.2.3'), true);
+  assert.equal(allow.check('192.168.1.5'), true);
+  assert.equal(allow.check('172.16.0.1'), false);
+  const none = s.makeAllowlist('');
+  assert.equal(none.check('8.8.8.8'), true);
+});
+
+test('rate limiter fixed window', () => {
+  const lim = s.makeLimiter(60_000, 2);
+  assert.equal(lim.allow('x'), true);
+  assert.equal(lim.allow('x'), true);
+  assert.equal(lim.allow('x'), false);
+  lim.reset('x');
+  assert.equal(lim.allow('x'), true);
+});
+
+test('/metrics exposes gauges', async () => {
+  const res = await fetch(server.base + '/metrics');
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.match(text, /cliotp_uptime_seconds/);
+  assert.match(text, /cliotp_entries \d+/);
+  assert.match(text, /cliotp_requests_total/);
+});
+
+test('readonly keys can read codes but not mutate or export', async () => {
+  const created = await req('POST', '/api/keys', { name: 'ro', scope: 'readonly' });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.scope, 'readonly');
+  const ro = created.body.key;
+
+  const codes = await req('GET', '/api/codes', undefined, ro);
+  assert.equal(codes.status, 200);
+
+  const add = await req('POST', '/api/entries', { name: 'x', secret: 'JBSWY3DPEHPK3PXP' }, ro);
+  assert.equal(add.status, 403);
+
+  const exp = await req('GET', '/api/export', undefined, ro);
+  assert.equal(exp.status, 403);
+
+  const keys = await req('GET', '/api/keys', undefined, ro);
+  assert.equal(keys.status, 403);
+
+  await req('DELETE', `/api/keys/${created.body.id}`);
+});
+
+test('duplicate entry labels are rejected', async () => {
+  const add1 = await req('POST', '/api/entries', { name: 'dupcheck', secret: 'JBSWY3DPEHPK3PXP', issuer: 'T' });
+  assert.equal(add1.status, 201);
+  const add2 = await req('POST', '/api/entries', { name: 'dupcheck', secret: 'JBSWY3DPEHPK3PXP', issuer: 'T' });
+  assert.equal(add2.status, 409);
+  await req('DELETE', `/api/entries/${add1.body[0].id}`);
+});
+
+test('lastUsedAt is recorded when a key is used', async () => {
+  const created = await req('POST', '/api/keys', { name: 'lu' });
+  const k = created.body.key;
+  await req('GET', '/api/codes', undefined, k);
+  const list = await req('GET', '/api/keys');
+  const entry = list.body.find((x) => x.id === created.body.id);
+  assert.ok(entry.lastUsedAt != null, 'lastUsedAt should be set after use');
+  await req('DELETE', `/api/keys/${created.body.id}`);
+});
+
+test('auth failures are rate-limited (429)', async () => {
+  // reset any prior failures
+  await req('GET', '/api/entries');
+  for (let i = 0; i < 10; i++) {
+    const r = await req('GET', '/api/entries', undefined, 'wrong-' + i);
+    assert.equal(r.status, 401);
+  }
+  const throttled = await req('GET', '/api/entries', undefined, 'wrong-final');
+  assert.equal(throttled.status, 429);
+  // a correct key resets the limiter
+  const ok = await req('GET', '/api/entries');
+  assert.equal(ok.status, 200);
+});
