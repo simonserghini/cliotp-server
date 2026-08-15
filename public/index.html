@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>cliotp</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- Login -->
+  <div id="login" class="login">
+    <div class="login-card">
+      <h1>cliotp</h1>
+      <p class="muted">Enter an API key to unlock your codes.</p>
+      <form id="login-form">
+        <input id="key-input" type="password" placeholder="API key" autocomplete="off" autofocus />
+        <button type="submit" class="btn btn-primary">Unlock</button>
+      </form>
+      <p id="login-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <!-- App -->
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand">cliotp</div>
+      <nav class="tabs">
+        <button class="tab active" data-tab="codes">Codes</button>
+        <button class="tab" data-tab="entries">Entries</button>
+        <button class="tab" data-tab="keys">API Keys</button>
+      </nav>
+      <button id="logout" class="btn btn-ghost">Log out</button>
+    </header>
+
+    <main>
+      <p id="toast" class="toast" hidden></p>
+
+      <!-- Codes -->
+      <section id="tab-codes" class="tab-panel">
+        <div id="codes-grid" class="codes-grid"></div>
+        <p id="codes-empty" class="empty" hidden>No entries yet. Add one in the Entries tab.</p>
+      </section>
+
+      <!-- Entries -->
+      <section id="tab-entries" class="tab-panel" hidden>
+        <form id="entry-form" class="card form-grid">
+          <input type="hidden" id="entry-id" />
+          <label>Name <input id="f-name" placeholder="alice" required /></label>
+          <label>Issuer <input id="f-issuer" placeholder="GitHub" /></label>
+          <label>Secret <input id="f-secret" placeholder="JBSWY3DPEHPK3PXP" /></label>
+          <label>Kind
+            <select id="f-kind">
+              <option value="totp">totp</option>
+              <option value="hotp">hotp</option>
+              <option value="steam">steam</option>
+            </select>
+          </label>
+          <label>Digits
+            <select id="f-digits">
+              <option value="6">6</option>
+              <option value="8">8</option>
+            </select>
+          </label>
+          <label>Period <input id="f-period" type="number" value="30" min="1" /></label>
+          <label>Algorithm
+            <select id="f-algorithm">
+              <option value="SHA1">SHA1</option>
+              <option value="SHA256">SHA256</option>
+              <option value="SHA512">SHA512</option>
+            </select>
+          </label>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary" id="entry-submit">Add</button>
+            <button type="button" class="btn btn-ghost" id="entry-cancel" hidden>Cancel</button>
+          </div>
+          <p class="hint">Paste a full <code>otpauth://</code> or <code>otpauth-migration://</code> URI into Name to import.</p>
+        </form>
+
+        <div id="entries-list" class="list"></div>
+      </section>
+
+      <!-- API Keys -->
+      <section id="tab-keys" class="tab-panel" hidden>
+        <form id="key-form" class="card inline-form">
+          <input id="key-name" placeholder="key name (e.g. my-laptop)" />
+          <button type="submit" class="btn btn-primary">Create key</button>
+        </form>
+        <div id="keys-list" class="list"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- New-key reveal modal -->
+  <div id="key-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Copy your new key</h2>
+      <p class="muted">This is shown <strong>once</strong>. Store it somewhere safe.</p>
+      <div class="key-reveal"><code id="new-key-value"></code></div>
+      <div class="modal-actions">
+        <button id="copy-key" class="btn btn-primary">Copy</button>
+        <button id="close-key-modal" class="btn btn-ghost">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

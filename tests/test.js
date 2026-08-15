@@ -264,3 +264,90 @@ test('add via Google migration URI imports all accounts', async () => {
   assert.equal(created.status, 201);
   assert.equal(created.body[0].name, 'Adam school te.p');
 });
+
+test('web UI is served without auth', async () => {
+  const html = await fetch(server.base + '/');
+  assert.equal(html.status, 200);
+  assert.match(html.headers.get('content-type'), /text\/html/);
+  const body = await html.text();
+  assert.match(body, /<html/);
+  assert.match(body, /cliotp/);
+
+  const js = await fetch(server.base + '/app.js');
+  assert.equal(js.status, 200);
+  assert.match(js.headers.get('content-type'), /javascript/);
+
+  const css = await fetch(server.base + '/style.css');
+  assert.equal(css.status, 200);
+  assert.match(css.headers.get('content-type'), /text\/css/);
+
+  // server source is never served as a static file (traversal neutralized)
+  const traversal = await fetch(server.base + '/../server.js');
+  assert.notEqual(traversal.status, 200);
+  const src = await fetch(server.base + '/server.js');
+  assert.notEqual(src.status, 200);
+  const srcBody = await src.text();
+  assert.ok(!srcBody.includes('createServer'), 'must not leak server source');
+});
+
+test('/api/codes peeks at every code without advancing HOTP counters', async () => {
+  const created = await req('POST', '/api/entries', {
+    name: 'peek', secret: SECRET_ASCII_20, kind: 'hotp', digits: 6, algorithm: 'SHA1', counter: 0,
+  });
+  const id = created.body[0].id;
+
+  // two peeks must both show the c=0 code and NOT advance the counter
+  const peek1 = await req('GET', '/api/codes');
+  const e1 = peek1.body.find((e) => e.id === id);
+  assert.equal(e1.code, '755224');
+  assert.equal(e1.counter, 0);
+
+  const peek2 = await req('GET', '/api/codes');
+  const e2 = peek2.body.find((e) => e.id === id);
+  assert.equal(e2.code, '755224');
+  assert.equal(e2.counter, 0);
+
+  // consuming advances it
+  const consumed = await req('GET', `/api/entries/${id}/code`);
+  assert.equal(consumed.body.code, '755224');
+
+  const peek3 = await req('GET', '/api/codes');
+  const e3 = peek3.body.find((e) => e.id === id);
+  assert.equal(e3.code, '287082');
+  assert.equal(e3.counter, 1);
+
+  await req('DELETE', `/api/entries/${id}`);
+});
+
+test('API key management lifecycle', async () => {
+  // list — the bootstrap key exists; no secret/hash is ever exposed
+  const list1 = await req('GET', '/api/keys');
+  assert.equal(list1.status, 200);
+  assert.ok(list1.body.length >= 1);
+  assert.equal(list1.body[0].secret, undefined);
+  assert.equal(list1.body[0].keyHash, undefined);
+
+  // create a key — secret returned exactly once
+  const created = await req('POST', '/api/keys', { name: 'ci-key' });
+  assert.equal(created.status, 201);
+  assert.match(created.body.key, /^[0-9a-f]{64}$/);
+  const newId = created.body.id;
+
+  // the new key authenticates
+  const withNew = await req('GET', '/api/entries', undefined, created.body.key);
+  assert.equal(withNew.status, 200);
+
+  // revoke it
+  const revoked = await req('DELETE', `/api/keys/${newId}`);
+  assert.equal(revoked.status, 200);
+
+  // the revoked key no longer works
+  const afterRevoke = await req('GET', '/api/entries', undefined, created.body.key);
+  assert.equal(afterRevoke.status, 401);
+
+  // the last remaining key cannot be revoked
+  const remaining = (await req('GET', '/api/keys')).body;
+  assert.equal(remaining.length, 1);
+  const lastRevoke = await req('DELETE', `/api/keys/${remaining[0].id}`);
+  assert.equal(lastRevoke.status, 400);
+});

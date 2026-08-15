@@ -2,7 +2,8 @@
 // cliotp-server — self-hosted TOTP / HOTP / Steam Guard server.
 // One file, zero runtime dependencies (Node >= 18). Implements RFC 4226/6238
 // with the built-in crypto module, stores entries encrypted at rest
-// (AES-256-GCM), and serves them over a bearer-token-authenticated REST API.
+// (AES-256-GCM), and serves them over a bearer-token-authenticated REST API
+// plus a built-in web UI. API keys are stored as sha256 hashes only.
 //
 //   node server.js                    # run (reads config from env)
 //   import * as s from './server.js'  # use as a library in tests
@@ -13,9 +14,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 // ---------------------------------------------------------------------------
 // Config / storage paths
@@ -398,17 +399,50 @@ export function withLock(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// Auth
+// Auth (multiple API keys, stored as sha256 hashes)
 // ---------------------------------------------------------------------------
 
-export function loadToken() {
-  if (process.env.CLIOTP_TOKEN) return process.env.CLIOTP_TOKEN;
-  const p = tokenFile();
-  if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8').trim();
+export function sha256hex(s) {
+  return crypto.createHash('sha256').update(String(s)).digest('hex');
+}
+
+export const keysFile = () => path.join(dataDir(), 'api-keys.json');
+
+export function loadKeys() {
+  const p = keysFile();
+  if (!fs.existsSync(p)) return [];
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8')).keys || [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveKeys(keys) {
+  const p = keysFile();
   fs.mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  const tok = crypto.randomBytes(32).toString('hex');
-  fs.writeFileSync(p, tok + '\n', { mode: 0o600 });
-  return tok;
+  const tmp = `${p}.tmp.${process.pid}.${crypto.randomBytes(4).toString('hex')}`;
+  fs.writeFileSync(tmp, JSON.stringify({ keys }, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, p);
+  fs.chmodSync(p, 0o600);
+}
+
+// Seed the keys file on first run, migrating a legacy api.token if present.
+// Returns the root key so a fresh install can print it exactly once.
+export function bootstrapKeys(envToken) {
+  if (fs.existsSync(keysFile())) return null;
+  const legacy = tokenFile();
+  const root = envToken || (fs.existsSync(legacy) ? fs.readFileSync(legacy, 'utf8').trim() : crypto.randomBytes(32).toString('hex'));
+  saveKeys([{ id: 'k_' + crypto.randomBytes(6).toString('hex'), name: 'default', keyHash: sha256hex(root), createdAt: Math.floor(Date.now() / 1000) }]);
+  if (!envToken) fs.writeFileSync(legacy, root + '\n', { mode: 0o600 });
+  return root;
+}
+
+export function isValidKey(provided, envToken) {
+  if (!provided) return false;
+  if (envToken && safeEqual(provided, envToken)) return true;
+  const h = sha256hex(provided);
+  return loadKeys().some((k) => safeEqual(k.keyHash, h));
 }
 
 function safeEqual(a, b) {
@@ -488,6 +522,30 @@ function applyEdit(entry, patch) {
 // HTTP server
 // ---------------------------------------------------------------------------
 
+const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8',
+  '.ico': 'image/x-icon',
+};
+
+function serveStatic(res, pathname) {
+  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  const full = path.resolve(PUBLIC_DIR, rel);
+  if (!full.startsWith(PUBLIC_DIR + path.sep)) return json(res, 404, { error: 'not found' });
+  if (!fs.existsSync(full) || !fs.statSync(full).isFile()) return json(res, 404, { error: 'not found' });
+  const body = fs.readFileSync(full);
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(full).toLowerCase()] || 'application/octet-stream',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-cache',
+  });
+  res.end(body);
+}
+
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
@@ -525,7 +583,8 @@ function publicEntry(e) {
 }
 
 export function createServer(options = {}) {
-  const token = options.token || loadToken();
+  const envToken = options.token || process.env.CLIOTP_TOKEN || null;
+  bootstrapKeys(envToken);
 
   function resolveEntry(entries, ref) {
     if (/^\d+$/.test(ref)) {
@@ -547,6 +606,11 @@ export function createServer(options = {}) {
     const p = url.pathname.replace(/\/+$/, '') || '/';
 
     try {
+      // Static web UI (public, no auth)
+      if (req.method === 'GET' && (p === '/' || p === '/app.js' || p === '/style.css')) {
+        return serveStatic(res, p);
+      }
+
       if (req.method === 'GET' && p === '/healthz') {
         return json(res, 200, { ok: true, version: VERSION });
       }
@@ -555,7 +619,7 @@ export function createServer(options = {}) {
       const auth = req.headers.authorization || '';
       const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const provided = bearer || req.headers['x-api-token'] || '';
-      if (!provided || !safeEqual(provided, token)) {
+      if (!provided || !isValidKey(provided, envToken)) {
         res.setHeader('WWW-Authenticate', 'Bearer');
         return json(res, 401, { error: 'unauthorized' });
       }
@@ -597,6 +661,54 @@ export function createServer(options = {}) {
       // GET /api/export  (all otpauth URIs — sensitive)
       if (req.method === 'GET' && p === '/api/export') {
         return json(res, 200, { entries: loadStore().map(encodeOtpauth) });
+      }
+
+      // GET /api/codes — peek at every code (does not advance HOTP counters)
+      if (req.method === 'GET' && p === '/api/codes') {
+        const now = Math.floor(Date.now() / 1000);
+        const codes = loadStore().map((e) => ({
+          id: e.id, name: e.name, issuer: e.issuer, kind: e.kind, digits: e.digits, period: e.period, algorithm: e.algorithm,
+          ...generateCode(e, now),
+        }));
+        return json(res, 200, codes);
+      }
+
+      // GET /api/keys — list API keys (metadata only; secrets are never returned again)
+      if (req.method === 'GET' && p === '/api/keys') {
+        return json(res, 200, loadKeys().map(({ id, name, createdAt }) => ({ id, name, createdAt })));
+      }
+
+      // POST /api/keys — create a key; its secret is returned exactly once
+      if (req.method === 'POST' && p === '/api/keys') {
+        const body = await readJsonBody(req);
+        return withLock(() => {
+          const keys = loadKeys();
+          const secret = crypto.randomBytes(32).toString('hex');
+          const key = {
+            id: 'k_' + crypto.randomBytes(6).toString('hex'),
+            name: String(body.name || '').trim() || 'key-' + (keys.length + 1),
+            keyHash: sha256hex(secret),
+            createdAt: Math.floor(Date.now() / 1000),
+          };
+          keys.push(key);
+          saveKeys(keys);
+          return json(res, 201, { id: key.id, name: key.name, createdAt: key.createdAt, key: secret });
+        });
+      }
+
+      // DELETE /api/keys/:id — revoke a key (never the last one)
+      const keyMatch = p.match(/^\/api\/keys\/([^/]+)$/);
+      if (keyMatch && req.method === 'DELETE') {
+        return withLock(() => {
+          const keys = loadKeys();
+          if (keys.length <= 1) return json(res, 400, { error: 'cannot revoke the last API key' });
+          const id = decodeURIComponent(keyMatch[1]);
+          const idx = keys.findIndex((k) => k.id === id);
+          if (idx < 0) return json(res, 404, { error: 'no such API key' });
+          keys.splice(idx, 1);
+          saveKeys(keys);
+          return json(res, 200, { revoked: id });
+        });
       }
 
       // Entry-scoped routes: /api/entries/:id[...]
@@ -684,9 +796,11 @@ function main() {
   const tlsCert = process.env.CLIOTP_TLS_CERT;
   const tlsKey = process.env.CLIOTP_TLS_KEY;
 
-  const token = loadToken();
-  const isNew = process.env.CLIOTP_TOKEN ? false : !fs.existsSync(tokenFile());
-  const server = createServer({ token, tlsCert, tlsKey });
+  const envToken = process.env.CLIOTP_TOKEN || null;
+  const hadKeys = fs.existsSync(keysFile());
+  const rootKey = bootstrapKeys(envToken);
+  const isNew = !envToken && !hadKeys;
+  const server = createServer({ token: envToken, tlsCert, tlsKey });
 
   server.listen(port, host, () => {
     const scheme = tlsCert && tlsKey ? 'https' : 'http';
@@ -697,7 +811,7 @@ function main() {
     console.log(`data dir: ${dataDir()}`);
     if (isNew) {
       // eslint-disable-next-line no-console
-      console.log(`generated API token (save it!): ${token}`);
+      console.log(`generated API token (save it!): ${rootKey}`);
     }
   });
 }

@@ -8,7 +8,7 @@ server you control and every client talks to it over a small REST API.
 
 One Node.js file, **zero runtime dependencies**. Implements RFC 4226 / RFC 6238
 with the built-in `crypto` module, stores secrets encrypted at rest
-(AES-256-GCM), and requires a bearer token for every API call.
+(AES-256-GCM), requires an API key for every request, and ships a web UI.
 
 ```
 $ cliotpc code github
@@ -24,7 +24,9 @@ $ cliotpc code github
 - import `otpauth://` links and Google Authenticator "transfer accounts"
   exports (`otpauth-migration://`) — every account at once
 - **encrypted at rest** (AES-256-GCM, key in `master.key`)
-- **authenticated API** — every `/api/*` route requires a bearer token
+- **authenticated API** — every `/api/*` route requires an API key
+- **multiple API keys** — create and revoke named keys (stored as sha256 hashes)
+- **web UI** — live codes, entry management, and key management in the browser
 - server runs in **Node**, **pm2**, or **Docker**; client is a single
   `cliotpc` command
 
@@ -110,6 +112,21 @@ cliotpc export                    # all URIs (backup)
 
 ---
 
+## Web UI
+
+The server serves a browser UI at `/`. Open `http://<host>:8080/`, paste an
+API key, and you get:
+
+- a **live codes** grid with countdown bars (HOTP shows a "Next code" button)
+- an **entries** manager — add (fields or `otpauth://` URI), edit, delete
+- an **API keys** manager — create named keys (shown once, with a copy button)
+  and revoke them
+
+The key stays in your browser's `localStorage` only and is sent as a bearer
+token, exactly like the CLI.
+
+---
+
 ## API reference
 
 Every route except `/healthz` requires:
@@ -128,7 +145,11 @@ Authorization: Bearer <token>      # or X-API-Token: <token>
 | PATCH | `/api/entries/:id` | Edit fields |
 | DELETE | `/api/entries/:id` | Remove |
 | GET | `/api/entries/:id/uri` | otpauth URI for one entry |
+| GET | `/api/codes` | Current codes for all entries (peek; does not advance HOTP) |
 | GET | `/api/export` | All otpauth URIs (sensitive) |
+| GET | `/api/keys` | List API keys (metadata only) |
+| POST | `/api/keys` | Create a key — secret returned exactly once |
+| DELETE | `/api/keys/:id` | Revoke a key (never the last one) |
 
 `:id` may be a stored id, a 1-based index, or a case-insensitive name
 substring (must be unique).
@@ -158,7 +179,7 @@ Server reads from environment variables:
 | Var | Default | Purpose |
 | --- | --- | --- |
 | `CLIOTP_DATA_DIR` | `~/.config/cliotp-server` | Where `secrets.tsv`, `master.key`, `api.token` live |
-| `CLIOTP_TOKEN` | auto-generated | Bearer token (or read from `api.token`) |
+| `CLIOTP_TOKEN` | auto-generated | Rescue key, always accepted (also seeded as the `default` key) |
 | `PORT` | `8080` | Listen port |
 | `HOST` | `0.0.0.0` | Listen address |
 | `CLIOTP_TLS_CERT` / `CLIOTP_TLS_KEY` | — | Optional; serve HTTPS directly |
@@ -173,18 +194,20 @@ Client reads `CLIOTP_SERVER`, `CLIOTP_TOKEN`, `CLIOTP_CONFIG`, or
 - `secrets.tsv` — entries, **encrypted** with AES-256-GCM. Header line is
   `cliotp-server-encrypted-v1`; the payload is `iv || tag || ciphertext`,
   base64. A random 32-byte key in `master.key` (mode `0600`) does the work.
-- `api.token` — the bearer token, mode `0600`.
-- Both files live in a `0700` directory.
+- `api-keys.json` — API keys as **sha256 hashes only** (raw keys are never
+  written to disk after creation).
+- `api.token` — legacy plaintext copy of the first ("default") key, mode `0600`.
+- All files live in a `0700` directory.
 
 **Back up `secrets.tsv` and `master.key` together** — lose the key, lose the
 secrets. Or run `cliotpc export` and stash the plaintext URIs somewhere safe.
 
 ### Threat model
 
-- The API token is the whole ball game: anyone with it can read every code.
-  Use a strong token and **always serve over TLS** (reverse proxy or
-  `CLIOTP_TLS_CERT`/`CLIOTP_TLS_KEY`). `docker compose` binds to localhost by
-  default for exactly this reason.
+- An API key is the whole ball game: anyone with it can read every code.
+  Use strong keys, revoke anything you don't recognize, and **always serve
+  over TLS** (reverse proxy or `CLIOTP_TLS_CERT`/`CLIOTP_TLS_KEY`). `docker
+  compose` binds to localhost by default for exactly this reason.
 - Secrets are protected at rest from someone who copies the disk, but not
   from someone who can read the process memory of the running server.
 - Run a **single server instance** against one data dir; HOTP counters

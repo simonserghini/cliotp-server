@@ -9,6 +9,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 COPY package.json server.js ./
+COPY public ./public
 
 RUN mkdir -p /data && chown -R node:node /data /app
 

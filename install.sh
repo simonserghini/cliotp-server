@@ -32,6 +32,8 @@ mkdir -p "$LIB" "$BIN" "$DATA_DIR"
 chmod 700 "$DATA_DIR"
 install -m 0644 "$HERE/server.js" "$HERE/package.json" "$LIB/"
 install -m 0755 "$HERE/client.js" "$LIB/client.js"
+mkdir -p "$LIB/public"
+cp -r "$HERE/public/." "$LIB/public/"
 
 # symlink the client into PATH
 ln -sf "$LIB/client.js" "$BIN/cliotpc"
