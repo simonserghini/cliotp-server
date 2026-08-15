@@ -1,0 +1,19 @@
+services:
+  cliotp-server:
+    build: .
+    image: cliotp-server:latest
+    container_name: cliotp-server
+    restart: unless-stopped
+    ports:
+      # Bind to localhost and put a TLS reverse proxy (caddy/nginx) in front.
+      - "127.0.0.1:8080:8080"
+    environment:
+      CLIOTP_TOKEN: ${CLIOTP_TOKEN:?set CLIOTP_TOKEN in .env (openssl rand -hex 32)}
+      CLIOTP_DATA_DIR: /data
+      PORT: "8080"
+      HOST: 0.0.0.0
+    volumes:
+      - cliotp-data:/data
+
+volumes:
+  cliotp-data:
