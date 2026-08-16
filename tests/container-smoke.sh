@@ -31,6 +31,8 @@ async function api(m, p, b, t = T) {
 
 check('healthz ok', (await (await fetch(base + '/healthz')).json()).ok === true);
 check('web UI served', (await (await fetch(base + '/')).text()).includes('<html'));
+check('import QR UI present', (await (await fetch(base + '/')).text()).includes('Import QR'));
+check('jsQR decoder served', (await fetch(base + '/vendor/jsQR.js')).status === 200);
 check('unauth 401', (await api('GET', '/api/entries', undefined, null)).s === 401);
 check('auth 200', (await api('GET', '/api/entries')).s === 200);
 
