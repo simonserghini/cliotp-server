@@ -433,3 +433,28 @@ test('auth failures are rate-limited (429)', async () => {
   const ok = await req('GET', '/api/entries');
   assert.equal(ok.status, 200);
 });
+
+test('session sign/verify roundtrip + tamper/expiry', () => {
+  const now = Math.floor(Date.now() / 1000);
+  const token = s.signSession({ email: 'x@y.z', exp: now + 100 }, 'secret');
+  const v = s.verifySession(token, 'secret');
+  assert.equal(v.email, 'x@y.z');
+  assert.equal(s.verifySession(token, 'wrong'), null);
+  assert.equal(s.verifySession(token.slice(0, -2) + 'xx', 'secret'), null);
+  const expired = s.signSession({ email: 'x@y.z', exp: now - 1 }, 'secret');
+  assert.equal(s.verifySession(expired, 'secret'), null);
+});
+
+test('auth endpoints when google is not configured', async () => {
+  const status = await req('GET', '/auth/status', undefined, null);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.authenticated, false);
+  assert.equal(status.body.googleEnabled, false);
+  assert.equal(status.body.email, null);
+
+  const logout = await req('POST', '/auth/logout', undefined, null);
+  assert.equal(logout.status, 200);
+
+  const login = await req('GET', '/auth/google/login', undefined, null);
+  assert.equal(login.status, 404);
+});

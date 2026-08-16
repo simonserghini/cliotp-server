@@ -6,6 +6,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 let key = localStorage.getItem(LS_KEY) || '';
 let codesTimer = null;
+let googleEnabled = false;
 
 // ---------------------------------------------------------------------------
 // API
@@ -20,7 +21,7 @@ async function api(method, path, body) {
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (res.status === 401) { logout(true); throw new Error('unauthorized'); }
+  if (res.status === 401) { logout(); throw new Error('unauthorized'); }
   let data = null;
   try { data = await res.json(); } catch { /* no body */ }
   if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
@@ -39,10 +40,13 @@ function toast(msg) {
 // Auth / view switching
 // ---------------------------------------------------------------------------
 
-function showLogin() {
+function showLoginView(mode) {
   $('#login').hidden = false;
   $('#app').hidden = true;
   if (codesTimer) { clearInterval(codesTimer); codesTimer = null; }
+  $('#google-login').hidden = mode !== 'google';
+  $('#login-form').hidden = mode !== 'key';
+  $('#use-google-login').hidden = !(mode === 'key' && googleEnabled);
 }
 
 function showApp() {
@@ -61,11 +65,11 @@ function login() {
   showApp();
 }
 
-function logout(silent) {
+function logout() {
   key = '';
   localStorage.removeItem(LS_KEY);
-  if (!silent) showLogin();
-  showLogin();
+  fetch('/auth/logout', { method: 'POST' }).catch(() => {});
+  boot();
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +449,10 @@ function stopCamera() {
 // ---------------------------------------------------------------------------
 
 $('#login-form').addEventListener('submit', (e) => { e.preventDefault(); login(); });
-$('#logout').addEventListener('click', () => logout(false));
+$('#logout').addEventListener('click', logout);
 $('#key-input').addEventListener('input', () => { $('#login-error').hidden = true; });
+$('#use-key-login').addEventListener('click', (e) => { e.preventDefault(); showLoginView('key'); });
+$('#use-google-login').addEventListener('click', (e) => { e.preventDefault(); showLoginView('google'); });
 
 $$('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.tab)));
 
@@ -497,4 +503,17 @@ function refreshAll() {
 }
 
 // boot
-if (key) showApp(); else showLogin();
+async function boot() {
+  try {
+    const res = await fetch('/auth/status');
+    if (res.ok) {
+      const status = await res.json();
+      googleEnabled = Boolean(status.googleEnabled);
+      if (status.authenticated) { showApp(); return; }
+      showLoginView(status.googleEnabled ? 'google' : 'key');
+      return;
+    }
+  } catch { /* /auth/status not available (older server) */ }
+  if (key) showApp(); else showLoginView('key');
+}
+boot();

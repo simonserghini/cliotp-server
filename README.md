@@ -137,6 +137,25 @@ token, exactly like the CLI.
 
 ---
 
+## Google sign-in (optional)
+
+Instead of pasting an API key, the web UI can use **Sign in with Google**,
+locked to your account(s):
+
+1. Create an OAuth 2.0 **Web application** client at
+   https://console.cloud.google.com/apis/credentials
+2. Add the redirect URI `https://<your-host>/auth/google/callback`
+3. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+   `GOOGLE_ALLOWED_EMAILS=you@gmail.com` (comma-separated), and
+   `SESSION_SECRET` (`openssl rand -hex 32`)
+4. Restart the server.
+
+A Google sign-in sets a signed 30-day session cookie with admin access; API
+keys keep working for `cliotpc` and scripts. Without Google config, the UI
+falls back to the API-key form.
+
+---
+
 ## API reference
 
 Every `/api/*` route requires a valid key (`/healthz`, `/metrics`, and the web
@@ -213,6 +232,10 @@ Server reads from environment variables:
 | `CLIOTP_AUTH_WINDOW_MS` | `900000` | Failed-auth window (15 min) |
 | `CLIOTP_TRUST_PROXY` | — | Set to honor `X-Forwarded-For` (behind a proxy) |
 | `CLIOTP_LOG` | on | Set `0` to disable the `/api` access log |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth client (enables Google sign-in) |
+| `GOOGLE_ALLOWED_EMAILS` | — | Comma-separated emails allowed to sign in |
+| `SESSION_SECRET` | — | Signs the web session cookie |
+| `GOOGLE_REDIRECT_URI` | — | Optional; defaults to `<host>/auth/google/callback` |
 
 Client reads `CLIOTP_SERVER`, `CLIOTP_TOKEN`, `CLIOTP_CONFIG`, or
 `--server` / `--token` / `--insecure` flags.

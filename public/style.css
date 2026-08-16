@@ -58,6 +58,8 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .btn-danger { color: var(--danger); border-color: var(--danger); background: transparent; }
 .btn-danger:hover { background: rgba(248, 81, 73, 0.1); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-block { display: block; width: 100%; text-align: center; text-decoration: none; margin-bottom: 10px; }
+.login-card a.btn { box-sizing: border-box; }
 
 /* ---- layout ---- */
 .topbar {

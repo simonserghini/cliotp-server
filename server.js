@@ -535,6 +535,50 @@ function clientIp(req) {
 }
 
 // ---------------------------------------------------------------------------
+// Google OAuth + web session
+// ---------------------------------------------------------------------------
+
+function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+function unb64url(s) { return Buffer.from(s, 'base64url'); }
+
+function getCookie(req, name) {
+  const header = req.headers.cookie || '';
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+function requestProto(req) {
+  return req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
+}
+
+export function signSession(obj, secret) {
+  const payload = b64url(JSON.stringify(obj));
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  return payload + '.' + sig;
+}
+
+export function verifySession(token, secret) {
+  if (!token || !secret) return null;
+  const dot = token.indexOf('.');
+  if (dot < 0) return null;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  if (!safeEqual(expected, sig)) return null;
+  try {
+    const obj = JSON.parse(unb64url(payload).toString('utf8'));
+    if (!obj.exp || obj.exp < Date.now() / 1000) return null;
+    return obj;
+  } catch { return null; }
+}
+
+const SESSION_AGE = 30 * 24 * 3600; // 30 days
+
+// ---------------------------------------------------------------------------
 // Code generation for a stored entry
 // ---------------------------------------------------------------------------
 
@@ -684,6 +728,16 @@ export function createServer(options = {}) {
   const apiLimiter = makeLimiter(60_000, envInt('CLIOTP_RATE_LIMIT', 300));
   const authLimiter = makeLimiter(envInt('CLIOTP_AUTH_WINDOW_MS', 900_000), envInt('CLIOTP_AUTH_MAX_FAILS', 10));
 
+  const google = {
+    clientId: options.googleClientId || process.env.GOOGLE_CLIENT_ID || '',
+    clientSecret: options.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET || '',
+    redirectUri: options.googleRedirectUri || process.env.GOOGLE_REDIRECT_URI || '',
+    allowed: (options.googleAllowedEmails || process.env.GOOGLE_ALLOWED_EMAILS || '')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    sessionSecret: options.sessionSecret || process.env.SESSION_SECRET || '',
+  };
+  const googleEnabled = Boolean(google.clientId && google.clientSecret && google.allowed.length && google.sessionSecret);
+
   function resolveEntry(entries, ref) {
     if (/^\d+$/.test(ref)) {
       const n = Number(ref);
@@ -716,7 +770,7 @@ export function createServer(options = {}) {
 
     try {
       // Static web UI (public, no auth): serve any file under public/.
-      if (req.method === 'GET' && !p.startsWith('/api/') && p !== '/healthz' && p !== '/metrics') {
+      if (req.method === 'GET' && !p.startsWith('/api/') && !p.startsWith('/auth/') && p !== '/healthz' && p !== '/metrics') {
         return serveStatic(res, p);
       }
 
@@ -743,6 +797,71 @@ export function createServer(options = {}) {
         return res.end(body);
       }
 
+      // --- Google OAuth + web session (public) ---
+      if (p === '/auth/status') {
+        const session = verifySession(getCookie(req, 'cliotp_session'), google.sessionSecret);
+        return json(res, 200, { authenticated: Boolean(session), googleEnabled, email: session ? session.email : null });
+      }
+
+      if (p === '/auth/logout') {
+        res.setHeader('Set-Cookie', 'cliotp_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+        return json(res, 200, { ok: true });
+      }
+
+      if (p === '/auth/google/login') {
+        if (!googleEnabled) return json(res, 404, { error: 'google auth not configured' });
+        const state = crypto.randomBytes(16).toString('hex');
+        res.setHeader('Set-Cookie', `cliotp_oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`);
+        const ru = google.redirectUri || `${requestProto(req)}://${req.headers.host}/auth/google/callback`;
+        const authUrl = 'https://accounts.google.com/o/oauth2/v2/auth'
+          + `?client_id=${encodeURIComponent(google.clientId)}`
+          + `&redirect_uri=${encodeURIComponent(ru)}`
+          + '&response_type=code&scope=' + encodeURIComponent('openid email')
+          + `&state=${encodeURIComponent(state)}`;
+        res.writeHead(302, { Location: authUrl });
+        return res.end();
+      }
+
+      if (p === '/auth/google/callback') {
+        if (!googleEnabled) return json(res, 404, { error: 'google auth not configured' });
+        const code = url.searchParams.get('code');
+        const state = url.searchParams.get('state');
+        if (!code || !state || state !== getCookie(req, 'cliotp_oauth_state')) {
+          return json(res, 400, { error: 'invalid oauth state' });
+        }
+        const ru = google.redirectUri || `${requestProto(req)}://${req.headers.host}/auth/google/callback`;
+        let tokens;
+        try {
+          const tr = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ code, client_id: google.clientId, client_secret: google.clientSecret, redirect_uri: ru, grant_type: 'authorization_code' }),
+          });
+          tokens = await tr.json();
+        } catch {
+          return json(res, 502, { error: 'token exchange failed' });
+        }
+        if (!tokens.access_token) return json(res, 400, { error: tokens.error_description || tokens.error || 'token exchange failed' });
+        let info;
+        try {
+          const ur = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + tokens.access_token } });
+          info = await ur.json();
+        } catch {
+          return json(res, 502, { error: 'userinfo request failed' });
+        }
+        const email = String(info.email || '').toLowerCase();
+        if (!info.email_verified || !email) return json(res, 403, { error: 'unverified email' });
+        if (!google.allowed.includes(email)) return json(res, 403, { error: 'email not allowed' });
+        const session = signSession({ email, exp: Math.floor(Date.now() / 1000) + SESSION_AGE }, google.sessionSecret);
+        const secure = requestProto(req) === 'https' ? '; Secure' : '';
+        res.setHeader('Set-Cookie', [
+          `cliotp_session=${session}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_AGE}${secure}`,
+          'cliotp_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+        ]);
+        res.writeHead(302, { Location: '/' });
+        return res.end();
+      }
+
       // Everything under /api requires auth + allowlist + rate limit.
       if (!allowlist.check(ip)) return json(res, 403, { error: 'forbidden by IP allowlist' });
       if (!apiLimiter.allow(ip)) return json(res, 429, { error: 'too many requests, slow down' });
@@ -750,7 +869,8 @@ export function createServer(options = {}) {
       const auth = req.headers.authorization || '';
       const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
       const provided = bearer || req.headers['x-api-token'] || '';
-      const cred = authenticate(provided, envToken);
+      const session = verifySession(getCookie(req, 'cliotp_session'), google.sessionSecret);
+      const cred = session ? { ok: true, key: null } : authenticate(provided, envToken);
       if (!cred.ok) {
         res.setHeader('WWW-Authenticate', 'Bearer');
         if (!authLimiter.allow(ip)) return json(res, 429, { error: 'too many failed attempts, slow down' });
@@ -758,7 +878,7 @@ export function createServer(options = {}) {
       }
       authLimiter.reset(ip);
       if (cred.key) touchLastUsed(cred.key);
-      const isAdmin = !cred.key || cred.key.scope !== 'readonly';
+      const isAdmin = session ? true : (!cred.key || cred.key.scope !== 'readonly');
 
       // GET /api/entries (any key)
       if (req.method === 'GET' && p === '/api/entries') {

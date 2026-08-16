@@ -13,10 +13,17 @@
   <div id="login" class="login">
     <div class="login-card">
       <h1>cliotp</h1>
-      <p class="muted">Enter an API key to unlock your codes.</p>
-      <form id="login-form">
-        <input id="key-input" type="password" placeholder="API key" autocomplete="off" autofocus />
+      <p class="muted">Sign in to unlock your codes.</p>
+
+      <div id="google-login" hidden>
+        <a href="/auth/google/login" class="btn btn-primary btn-block">Sign in with Google</a>
+        <p class="muted"><a href="#" id="use-key-login">Use an API key instead</a></p>
+      </div>
+
+      <form id="login-form" hidden>
+        <input id="key-input" type="password" placeholder="API key" autocomplete="off" />
         <button type="submit" class="btn btn-primary">Unlock</button>
+        <p class="muted"><a href="#" id="use-google-login" hidden>Sign in with Google instead</a></p>
       </form>
       <p id="login-error" class="error" hidden></p>
     </div>
