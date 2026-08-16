@@ -38,6 +38,7 @@
         <button class="tab" data-tab="entries">Entries</button>
         <button class="tab" data-tab="keys">API Keys</button>
       </nav>
+      <button id="import-open" class="btn">Import QR</button>
       <button id="logout" class="btn btn-ghost">Log out</button>
     </header>
 
@@ -81,7 +82,6 @@
           <div class="form-actions">
             <button type="submit" class="btn btn-primary" id="entry-submit">Add</button>
             <button type="button" class="btn btn-ghost" id="entry-cancel" hidden>Cancel</button>
-            <button type="button" class="btn" id="import-open">Import QR</button>
           </div>
           <p class="hint">Paste a full <code>otpauth://</code> or <code>otpauth-migration://</code> URI into Name to import.</p>
         </form>
