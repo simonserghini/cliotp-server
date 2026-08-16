@@ -74,6 +74,7 @@
           <div class="form-actions">
             <button type="submit" class="btn btn-primary" id="entry-submit">Add</button>
             <button type="button" class="btn btn-ghost" id="entry-cancel" hidden>Cancel</button>
+            <button type="button" class="btn" id="import-open">Import QR</button>
           </div>
           <p class="hint">Paste a full <code>otpauth://</code> or <code>otpauth-migration://</code> URI into Name to import.</p>
         </form>
@@ -105,6 +106,35 @@
     </div>
   </div>
 
+  <!-- Import QR modal -->
+  <div id="import-modal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Import from QR code</h2>
+      <p class="muted">Upload, paste, or scan a QR code. Works with <code>otpauth://</code> and Google Authenticator <code>otpauth-migration://</code> exports.</p>
+
+      <div class="import-actions">
+        <button type="button" class="btn" id="import-upload-btn">Upload image</button>
+        <input type="file" id="import-file" accept="image/*" hidden />
+        <button type="button" class="btn" id="import-paste-btn">Paste image</button>
+        <button type="button" class="btn btn-primary" id="import-camera-btn">Open camera</button>
+      </div>
+
+      <div id="import-camera-wrap" class="import-camera" hidden>
+        <video id="import-video" playsinline muted></video>
+        <canvas id="import-canvas" hidden></canvas>
+        <p class="muted" id="import-camera-status">Point your camera at a QR code…</p>
+        <button type="button" class="btn" id="import-camera-stop">Stop camera</button>
+      </div>
+
+      <p id="import-status" class="muted" hidden></p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="close-import-modal">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/vendor/jsQR.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

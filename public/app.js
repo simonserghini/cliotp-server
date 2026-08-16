@@ -290,6 +290,157 @@ function esc(s) {
 }
 
 // ---------------------------------------------------------------------------
+// Import QR (upload / paste / camera scan)
+// ---------------------------------------------------------------------------
+
+const importModal = $('#import-modal');
+const importFile = $('#import-file');
+const importVideo = $('#import-video');
+const importCanvas = $('#import-canvas');
+const importStatus = $('#import-status');
+const importCameraWrap = $('#import-camera-wrap');
+const importCameraStatus = $('#import-camera-status');
+let cameraStream = null;
+let cameraRaf = null;
+
+function setImportStatus(msg) { importStatus.textContent = msg; importStatus.hidden = false; }
+
+function openImport() {
+  importModal.hidden = false;
+  importStatus.hidden = true;
+  stopCamera();
+}
+
+function closeImport() {
+  importModal.hidden = true;
+  stopCamera();
+}
+
+function decodeQR(imageData) {
+  try {
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    return code ? code.data : null;
+  } catch { return null; }
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('could not load image'));
+    img.src = src;
+  });
+}
+
+function imageToData(img) {
+  const c = document.createElement('canvas');
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d', { willReadFrequently: true });
+  cx.drawImage(img, 0, 0, w, h);
+  return cx.getImageData(0, 0, w, h);
+}
+
+async function handleImportUri(uri) {
+  if (!/^otpauth(-migration)?:\/\//i.test(uri)) {
+    setImportStatus('Not an otpauth:// (or otpauth-migration://) QR code.');
+    return;
+  }
+  setImportStatus('Importing…');
+  try {
+    const added = await api('POST', '/api/entries', { uri });
+    const names = added.map((e) => (e.issuer ? e.issuer + ':' : '') + e.name).join(', ');
+    setImportStatus('Imported ' + added.length + ' account' + (added.length === 1 ? '' : 's') + ': ' + names);
+    await loadEntries();
+    await loadCodes();
+  } catch (e) {
+    setImportStatus('Import failed: ' + e.message);
+  }
+}
+
+async function importFromImageData(data) {
+  const code = decodeQR(data);
+  if (!code) { setImportStatus('No QR code found in that image. Try a sharper or larger image.'); return; }
+  await handleImportUri(code);
+}
+
+function onFileChosen(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  setImportStatus('Reading image…');
+  loadImage(URL.createObjectURL(file))
+    .then((img) => importFromImageData(imageToData(img)))
+    .catch((err) => setImportStatus('Could not read image: ' + err.message));
+}
+
+function onPaste(e) {
+  if (importModal.hidden) return;
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type && item.type.startsWith('image/')) {
+      const blob = item.getAsFile();
+      if (blob) {
+        e.preventDefault();
+        setImportStatus('Reading image…');
+        loadImage(URL.createObjectURL(blob))
+          .then((img) => importFromImageData(imageToData(img)))
+          .catch((err) => setImportStatus('Could not read image: ' + err.message));
+      }
+      return;
+    }
+  }
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setImportStatus('Camera requires HTTPS (or localhost). Try upload or paste instead.');
+    return;
+  }
+  setImportStatus('Requesting camera…');
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (err) {
+    setImportStatus('Could not access camera: ' + err.message);
+    return;
+  }
+  importCameraWrap.hidden = false;
+  importVideo.srcObject = cameraStream;
+  try { await importVideo.play(); } catch { /* autoplay handled below */ }
+  importCameraStatus.textContent = 'Point your camera at a QR code…';
+  setImportStatus('Scanning…');
+  scanLoop();
+}
+
+function scanLoop() {
+  if (!cameraStream) return;
+  const vw = importVideo.videoWidth;
+  const vh = importVideo.videoHeight;
+  if (vw && vh) {
+    importCanvas.width = vw;
+    importCanvas.height = vh;
+    const cx = importCanvas.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(importVideo, 0, 0, vw, vh);
+    const code = decodeQR(cx.getImageData(0, 0, vw, vh));
+    if (code) {
+      stopCamera();
+      handleImportUri(code);
+      return;
+    }
+  }
+  cameraRaf = requestAnimationFrame(scanLoop);
+}
+
+function stopCamera() {
+  if (cameraRaf) { cancelAnimationFrame(cameraRaf); cameraRaf = null; }
+  if (cameraStream) { cameraStream.getTracks().forEach((t) => t.stop()); cameraStream = null; }
+  importCameraWrap.hidden = true;
+  importVideo.srcObject = null;
+}
+
+// ---------------------------------------------------------------------------
 // Wire up events
 // ---------------------------------------------------------------------------
 
@@ -329,6 +480,15 @@ $('#copy-key').addEventListener('click', async () => {
 });
 
 $('#close-key-modal').addEventListener('click', () => { $('#key-modal').hidden = true; });
+
+$('#import-open').addEventListener('click', openImport);
+$('#close-import-modal').addEventListener('click', closeImport);
+$('#import-upload-btn').addEventListener('click', () => importFile.click());
+importFile.addEventListener('change', onFileChosen);
+$('#import-paste-btn').addEventListener('click', () => setImportStatus('Paste an image now (Ctrl/Cmd+V) with the image on your clipboard.'));
+$('#import-camera-btn').addEventListener('click', startCamera);
+$('#import-camera-stop').addEventListener('click', stopCamera);
+document.addEventListener('paste', onPaste);
 
 function refreshAll() {
   loadCodes();

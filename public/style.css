@@ -124,4 +124,11 @@ main { max-width: 1100px; margin: 0 auto; padding: 24px 20px; }
 
 .empty { color: var(--muted); text-align: center; padding: 40px 0; }
 
+/* ---- import modal ---- */
+.import-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+.import-camera { margin: 14px 0; }
+.import-camera video { width: 100%; max-width: 360px; border-radius: 8px; border: 1px solid var(--border); background: #000; }
+.import-camera p { margin: 8px 0; }
+#import-status { margin: 12px 0; word-break: break-word; }
+
 [hidden] { display: none !important; }

@@ -715,8 +715,8 @@ export function createServer(options = {}) {
     });
 
     try {
-      // Static web UI (public, no auth)
-      if (req.method === 'GET' && (p === '/' || p === '/app.js' || p === '/style.css')) {
+      // Static web UI (public, no auth): serve any file under public/.
+      if (req.method === 'GET' && !p.startsWith('/api/') && p !== '/healthz' && p !== '/metrics') {
         return serveStatic(res, p);
       }
 
