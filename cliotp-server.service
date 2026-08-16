@@ -1,6 +1,6 @@
 [Unit]
 Description=cliotp-server (TOTP/HOTP/Steam API + web UI)
-Documentation=https://github.com/yourname/cliotp-server
+Documentation=https://github.com/simonserghini/cliotp-server
 After=network-online.target
 Wants=network-online.target
 

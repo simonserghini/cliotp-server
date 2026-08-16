@@ -2,7 +2,7 @@
 
 **TOTP / HOTP / Steam Guard codes, self-hosted on a VPS, fetched from your terminal.**
 
-The cloud sibling of [`cliotp`](https://github.com/yourname/cliotp) — same
+The cloud sibling of the `cliotp` bash script — same
 crypto, same plain-`cliotpc code alice` output, but the secrets live on a
 server you control and every client talks to it over a small REST API.
 
